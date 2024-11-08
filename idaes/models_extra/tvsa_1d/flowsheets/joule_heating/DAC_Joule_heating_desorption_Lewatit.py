@@ -11,6 +11,8 @@
 # for full copyright and license information.
 ###############################################################################
 
+# desorption step simulation using Joule heating
+# wall boundary set as almost adiabatic
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -22,7 +24,6 @@ from pyomo.environ import (
     Var,
     Param,
     value,
-    assert_optimal_termination,
     units as pyunits,
 )
 from pyomo.network import Arc
@@ -32,7 +33,6 @@ from idaes.core import FlowsheetBlock, EnergyBalanceType
 from idaes.core.util import scaling as iscale
 from idaes.core.solvers import get_solver
 from idaes.core.util.model_statistics import degrees_of_freedom
-from idaes.core.util.model_diagnostics import DiagnosticsToolbox
 from idaes.core.util.dyn_utils import copy_values_at_time, copy_non_time_indexed_values
 from idaes.core.util.initialization import initialize_by_time_element, propagate_state
 import idaes.logger as idaeslog
@@ -55,11 +55,13 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     m = ConcreteModel()
     m.dynamic = dynamic
     if time_set is None:
-        time_set = [0, 30, 60, 2000]
+        time_set = [0,990]
     if nstep is None:
-        nstep = 30
+        nstep = 33
     if m.dynamic:
-        m.fs = FlowsheetBlock(dynamic=True, time_set=time_set, time_units=pyunits.s)
+        m.fs = FlowsheetBlock(
+            dynamic=True, time_set=time_set, time_units=pyunits.s
+        )
     else:
         m.fs = FlowsheetBlock(dynamic=False)
 
@@ -69,15 +71,15 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     pres_bounds = (1e4, 1e5, 1e6, pyunits.Pa)
     configuration["state_bounds"]["pressure"] = pres_bounds
     m.fs.gas_properties = GenericParameterBlock(
-        **configuration,
-        doc="gas property",
+	    **configuration,
+	    doc="gas property",
     )
 
     m.fs.gas_properties.set_default_scaling("enth_mol_phase", 1e-3)
     m.fs.gas_properties.set_default_scaling("pressure", 1e-5)
     m.fs.gas_properties.set_default_scaling("temperature", 1e-2)
-    m.fs.gas_properties.set_default_scaling("flow_mol", 1e4)
-    m.fs.gas_properties.set_default_scaling("flow_mol_phase", 1e4)
+    m.fs.gas_properties.set_default_scaling("flow_mol", 1e1)
+    m.fs.gas_properties.set_default_scaling("flow_mol_phase", 1e1)
     m.fs.gas_properties.set_default_scaling("_energy_density_term", 1e-4)
 
     _mf_scale = {
@@ -87,15 +89,11 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     }
     for comp, s in _mf_scale.items():
         m.fs.gas_properties.set_default_scaling("mole_frac_comp", s, index=comp)
-        m.fs.gas_properties.set_default_scaling(
-            "mole_frac_phase_comp", s, index=("Vap", comp)
-        )
-        m.fs.gas_properties.set_default_scaling(
-            "flow_mol_phase_comp", s * 1e4, index=("Vap", comp)
-        )
+        m.fs.gas_properties.set_default_scaling("mole_frac_phase_comp", s, index=("Vap", comp))
+        m.fs.gas_properties.set_default_scaling("flow_mol_phase_comp", s * 1e1, index=("Vap", comp))
 
     nxfe = 20
-    x_nfe_list = [0, 1]
+    x_nfe_list = [0,1]
     m.fs.FB = FixedBed1D(
         dynamic=dynamic,
         finite_elements=nxfe,
@@ -105,19 +103,20 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
         pressure_drop_type="ergun_correlation",
         property_package=m.fs.gas_properties,
         adsorbent="Lewatit",
-        coadsorption_isotherm="Mechanistic",  # "Stampi-Bombelli", #"WADST","Mechanistic"
+        coadsorption_isotherm="Mechanistic", #"None", "Stampi-Bombelli", #"WADST","Mechanistic"
         adsorbent_shape="particle",
+        has_joule_heating=True,
     )
 
     m.fs.Inlet_Valve = Valve(
         dynamic=False,
-        valve_function_callback=ValveFunctionType.linear,
+        valve_function_callback= ValveFunctionType.linear,
         property_package=m.fs.gas_properties,
     )
 
     m.fs.Outlet_Valve = Valve(
         dynamic=False,
-        valve_function_callback=ValveFunctionType.linear,
+        valve_function_callback= ValveFunctionType.linear,
         property_package=m.fs.gas_properties,
     )
 
@@ -135,39 +134,32 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     if m.dynamic:
         m.discretizer = TransformationFactory("dae.finite_difference")
         m.discretizer.apply_to(m, nfe=nstep, wrt=m.fs.time, scheme="BACKWARD")
-    m.fs.FB.kf["CO2"] = 0.005  # original 0.003
-    m.fs.FB.kf["H2O"] = 0.0143  # original 0.0086
-    m.fs.FB.bed_diameter.fix(0.0067)
-    m.fs.FB.wall_diameter.fix(0.0068)
-    m.fs.FB.bed_height.fix(0.01074)
+    m.fs.FB.kf["CO2"] = 0.005
+    m.fs.FB.kf["H2O"] = 0.0025 # originally 0.0143, high Kf["H2O"] causes convergence issue if RH in air is high
+    m.fs.FB.bed_diameter.fix(0.1)
+    m.fs.FB.wall_diameter.fix(0.105)
+    m.fs.FB.bed_height.fix(0.01)
     m.fs.FB.particle_dia.fix(5.2e-4)
-    m.fs.FB.heat_transfer_coeff_gas_wall = 353.0  # original 35.3
-    m.fs.FB.heat_transfer_coeff_fluid_wall = (
-        2200  # original 220, use a large value to mimic fixed wall temperature
-    )
+    m.fs.FB.heat_transfer_coeff_gas_wall = 3.53 # original 35.3
+    m.fs.FB.heat_transfer_coeff_fluid_wall = 0.22 # 220 in Young's paper, use very low value for adiabatic case
     m.fs.FB.fluid_temperature.fix(298.15)
+    m.fs.FB.joule_heating_rate.fix(0)
 
-    flow_mol_gas = 3e-5  # Reported by the paper by Young et al. (2021)
-    m.fs.Inlet_Valve.Cv.fix(
-        0.000003
-    )
+    flow_mol_gas = 0.0681
+    m.fs.Inlet_Valve.Cv.fix(0.003)  # Estimated to get the desired flow rates at 90% valve opening
     m.fs.Inlet_Valve.valve_opening.fix(0.9)
     m.fs.Inlet_Valve.inlet.flow_mol.fix(flow_mol_gas)
     m.fs.Inlet_Valve.inlet.temperature.fix(298.15)
-    m.fs.Inlet_Valve.inlet.pressure.fix(
-        102000
-    )
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "CO2"].fix(0.000001)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "H2O"].fix(0.0001)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "N2"].fix(0.999899)
+    m.fs.Inlet_Valve.inlet.pressure.fix(114000)
+    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "CO2"].fix(0.0004)
+    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "H2O"].fix(0.01)
+    m.fs.Inlet_Valve.inlet.mole_frac_comp[:,  "N2"].fix(0.9896)
 
-    m.fs.Outlet_Valve.Cv.fix(
-        0.000003
-    )
+    m.fs.Outlet_Valve.Cv.fix(0.003) # Estimated to get the desired flow rates at 90% valve opening
     m.fs.Outlet_Valve.outlet.pressure.fix(101325)
 
     iscale.set_scaling_factor(m.fs.FB.gas_phase.heat, 1e-2)
-    iscale.set_scaling_factor(m.fs.FB.gas_phase.area, 1e4)
+    iscale.set_scaling_factor(m.fs.FB.gas_phase.area, 1e3)
     iscale.set_scaling_factor(m.fs.Inlet_Valve.control_volume.work, 1e-3)
     iscale.set_scaling_factor(m.fs.Outlet_Valve.control_volume.work, 1e-3)
     iscale.calculate_scaling_factors(m)
@@ -188,42 +180,18 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
         m.fs.Outlet_Valve.valve_opening.unfix()
         m.fs.Outlet_Valve.initialize()
         print("flow_mol=", value(m.fs.Inlet_Valve.inlet.flow_mol[0]))
-        print(
-            "Cvs of inlet and outlet valves=",
-            value(m.fs.Inlet_Valve.Cv),
-            value(m.fs.Outlet_Valve.Cv),
-        )
-        print(
-            "openings of inlet and outlet valves=",
-            value(m.fs.Inlet_Valve.valve_opening[0]),
-            value(m.fs.Outlet_Valve.valve_opening[0]),
-        )
-        print(
-            "bed inlet and outlet pressures = ",
-            value(m.fs.FB.gas_inlet.pressure[0]),
-            value(m.fs.FB.gas_outlet.pressure[0]),
-        )
+        print("Cvs of inlet and outlet valves=", value(m.fs.Inlet_Valve.Cv), value(m.fs.Outlet_Valve.Cv))
+        print("openings of inlet and outlet valves=", value(m.fs.Inlet_Valve.valve_opening[0]), value(m.fs.Outlet_Valve.valve_opening[0]))
+        print("bed inlet and outlet pressures = ", value(m.fs.FB.gas_inlet.pressure[0]), value(m.fs.FB.gas_outlet.pressure[0]))
         # unfix flow rate but fix two valve openings, calculate flow rate
         m.fs.Inlet_Valve.inlet.flow_mol.unfix()
         m.fs.Inlet_Valve.valve_opening.fix(0.9)
-        m.fs.Outlet_Valve.valve_opening.fix(0.43067)
+        m.fs.Outlet_Valve.valve_opening.fix(0.2079)
         solver.solve(m, tee=True)
         print("flow_mol=", value(m.fs.Inlet_Valve.inlet.flow_mol[0]))
-        print(
-            "Cvs of inlet and outlet valves=",
-            value(m.fs.Inlet_Valve.Cv),
-            value(m.fs.Outlet_Valve.Cv),
-        )
-        print(
-            "openings of inlet and outlet valves=",
-            value(m.fs.Inlet_Valve.valve_opening[0]),
-            value(m.fs.Outlet_Valve.valve_opening[0]),
-        )
-        print(
-            "bed inlet and outlet pressures = ",
-            value(m.fs.FB.gas_inlet.pressure[0]),
-            value(m.fs.FB.gas_outlet.pressure[0]),
-        )
+        print("Cvs of inlet and outlet valves=", value(m.fs.Inlet_Valve.Cv), value(m.fs.Outlet_Valve.Cv))
+        print("openings of inlet and outlet valves=", value(m.fs.Inlet_Valve.valve_opening[0]), value(m.fs.Outlet_Valve.valve_opening[0]))
+        print("bed inlet and outlet pressures = ", value(m.fs.FB.gas_inlet.pressure[0]), value(m.fs.FB.gas_outlet.pressure[0]))
         assert_units_consistent(m)
         print("assert_units_consistent called")
     return m
@@ -238,47 +206,56 @@ def main_dynamic():
     m_ss = get_model(dynamic=False)
     m_dyn = get_model(dynamic=True)
     copy_non_time_indexed_values(
-        m_dyn.fs, m_ss.fs, copy_fixed=True, outlvl=idaeslog.ERROR
-    )
+            m_dyn.fs, m_ss.fs, copy_fixed=True, outlvl=idaeslog.ERROR
+        )
     for t in m_dyn.fs.time:
         copy_values_at_time(
             m_dyn.fs, m_ss.fs, t, 0.0, copy_fixed=True, outlvl=idaeslog.ERROR
         )
     optarg = {
-        "max_iter": 50,
-        "nlp_scaling_method": "user-scaling",
-        # "halt_on_ampl_error": "yes",
-        "linear_solver": "ma27",  # ma57 is default for ipopt_v2, which has convergence issue
+    "max_iter": 100,
+    "nlp_scaling_method": "user-scaling",
+    #"halt_on_ampl_error": "yes",
+    "linear_solver": "ma57",
     }
     solver = get_solver("ipopt_v2")
     solver.options = optarg
-    # add disturbance and solve dynamic model
+    #add disturbance and solve dynamic model
+    yco2_1 = 0.00001
+    yh2o_1 = 0.99998
+    yn2_1  = 0.00001
     for t in m_dyn.fs.time:
-        yco2_1 = 0.01
-        yh2o_1 = 0.00938  # 0.01565 at 50% RH
-        yn2_1 = 0.98062
-        if t > 20:
-            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t, "CO2"].fix(yco2_1)
-            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t, "H2O"].fix(yh2o_1)
+        if t>=30:
+            m_dyn.fs.FB.joule_heating_rate[t,:].fix(2.2e5)
+            m_dyn.fs.FB.fluid_temperature[t].fix(333.15)
+            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"CO2"].fix(yco2_1)
+            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"H2O"].fix(yh2o_1)
             m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t, "N2"].fix(yn2_1)
+            m_dyn.fs.Inlet_Valve.inlet.temperature[t].fix(333.15)
+            m_dyn.fs.Inlet_Valve.inlet.pressure[t].fix(20500)
+            m_dyn.fs.Outlet_Valve.outlet.pressure[t].fix(20000)
+        if t>=210 and t<450:
+            qjoule = 2.2e5 -2.2e5/(450-210)*(t-210)
+            m_dyn.fs.FB.joule_heating_rate[t,:].fix(qjoule)
+        if t>=450:
+            m_dyn.fs.FB.joule_heating_rate[t,:].fix(0)
+       
+    dof = degrees_of_freedom(m_dyn)
+    print("dof of dynamic model=", dof)   
+    print("inlet and outlet valve opening at t=0 are", value(m_dyn.fs.Inlet_Valve.valve_opening[0]), value(m_dyn.fs.Outlet_Valve.valve_opening[0]))
 
-    print(
-        "inlet and outlet valve opening at t=0 are",
-        value(m_dyn.fs.Inlet_Valve.valve_opening[0]),
-        value(m_dyn.fs.Outlet_Valve.valve_opening[0]),
-    )
     # solve each time element one by one
-    # initialize_by_time_element(m_dyn.fs, m_dyn.fs.time, solver=solver, outlvl=4)
-    results = solver.solve(m_dyn, tee=True)
-    # write_dynamic_results_to_csv(m_dyn, "Lewatit_1pct_30RH_high_kf_result.csv")
-    assert_optimal_termination(results)
-    dt = DiagnosticsToolbox(m_dyn)
-    # dt.assert_no_structural_warnings(ignore_unit_consistency=True)
-    # dt.report_structural_issues(m_dyn)
-    print("-----after structure issue")
-    dt.assert_no_numerical_warnings(ignore_parallel_components=True)
-    # dt.display_potential_evaluation_errors(ignore_unit_consistency=True)
-    # ------------------------------------------------------------------------------
+    initialize_by_time_element(m_dyn.fs, m_dyn.fs.time, solver=solver, outlvl=4)
+    solver.solve(m_dyn,tee=True)
+    #write_dynamic_results_to_csv(m_dyn,"microwave_results.csv")
+    # calculate total CO2 leaving the bed over the simulation time
+    co2_desorbed = 0
+    t_prev = 0
+    for t in m_dyn.fs.config.time:
+        if t>0:
+            co2_desorbed += value(m_dyn.fs.FB.gas_phase.properties[t,1].flow_mol_comp["CO2"]*(t-t_prev))
+            t_prev = t
+    print("mole of CO2 desorbed:", co2_desorbed)
     # plot figures
     time = []
     xlabel = ["x=0.0", "x=0.2", "x=0.4", "x=0.6", "x=0.8", "x=1.0"]
@@ -297,6 +274,7 @@ def main_dynamic():
     flow_mol = {}
     vel_sup = {}
     heat_fluid = {}
+    heat_joule = {}
     for t in m_dyn.fs.config.time:
         time.append(t)
     ix = 0
@@ -315,33 +293,23 @@ def main_dynamic():
         y_flow_mol = []
         y_vel_sup = []
         y_heat_fluid = []
+        y_heat_joule = []
         for t in m_dyn.fs.config.time:
-            y_solid_temp.append(value(m_dyn.fs.FB.solid_temperature[t, x] - 273.15))
-            y_gas_temp.append(
-                value(m_dyn.fs.FB.gas_phase.properties[t, x].temperature - 273.15)
-            )
-            y_wall_temp.append(value(m_dyn.fs.FB.wall_temperature[t, x] - 273.15))
-            y_co2_mf.append(
-                value(m_dyn.fs.FB.gas_phase.properties[t, x].mole_frac_comp["CO2"])
-            )
-            y_h2o_mf.append(
-                value(m_dyn.fs.FB.gas_phase.properties[t, x].mole_frac_comp["H2O"])
-            )
-            y_n2_mf.append(
-                value(m_dyn.fs.FB.gas_phase.properties[t, x].mole_frac_comp["N2"])
-            )
-            y_loading_co2.append(value(m_dyn.fs.FB.adsorbate_loading[t, x, "CO2"]))
-            y_loading_co2_eq.append(
-                value(m_dyn.fs.FB.adsorbate_loading_equil[t, x, "CO2"])
-            )
-            y_loading_h2o.append(value(m_dyn.fs.FB.adsorbate_loading[t, x, "H2O"]))
-            y_loading_h2o_eq.append(
-                value(m_dyn.fs.FB.adsorbate_loading_equil[t, x, "H2O"])
-            )
-            y_pres.append(value(m_dyn.fs.FB.gas_phase.properties[t, x].pressure))
-            y_flow_mol.append(value(m_dyn.fs.FB.gas_phase.properties[t, x].flow_mol))
-            y_vel_sup.append(value(m_dyn.fs.FB.velocity_superficial_gas[t, x]))
-            y_heat_fluid.append(value(m_dyn.fs.FB.heat_fluid_to_wall[t, x]))
+            y_solid_temp.append(value(m_dyn.fs.FB.solid_temperature[t,x]-273.15))
+            y_gas_temp.append(value(m_dyn.fs.FB.gas_phase.properties[t,x].temperature-273.15))
+            y_wall_temp.append(value(m_dyn.fs.FB.wall_temperature[t,x]-273.15))
+            y_co2_mf.append(value(m_dyn.fs.FB.gas_phase.properties[t,x].mole_frac_comp["CO2"]))
+            y_h2o_mf.append(value(m_dyn.fs.FB.gas_phase.properties[t,x].mole_frac_comp["H2O"]))
+            y_n2_mf.append(value(m_dyn.fs.FB.gas_phase.properties[t,x].mole_frac_comp["N2"]))
+            y_loading_co2.append(value(m_dyn.fs.FB.adsorbate_loading[t,x,"CO2"]))
+            y_loading_co2_eq.append(value(m_dyn.fs.FB.adsorbate_loading_equil[t,x,"CO2"]))
+            y_loading_h2o.append(value(m_dyn.fs.FB.adsorbate_loading[t,x,"H2O"]))
+            y_loading_h2o_eq.append(value(m_dyn.fs.FB.adsorbate_loading_equil[t,x,"H2O"]))
+            y_pres.append(value(m_dyn.fs.FB.gas_phase.properties[t,x].pressure))
+            y_flow_mol.append(value(m_dyn.fs.FB.gas_phase.properties[t,x].flow_mol))
+            y_vel_sup.append(value(m_dyn.fs.FB.velocity_superficial_gas[t,x]))
+            y_heat_fluid.append(value(m_dyn.fs.FB.heat_fluid_to_wall[t,x]))
+            y_heat_joule.append(value(m_dyn.fs.FB.joule_heating_rate[t,x]*m_dyn.fs.FB.bed_area))
         solid_temp[xlabel[ix]] = y_solid_temp
         gas_temp[xlabel[ix]] = y_gas_temp
         wall_temp[xlabel[ix]] = y_wall_temp
@@ -356,6 +324,7 @@ def main_dynamic():
         flow_mol[xlabel[ix]] = y_flow_mol
         vel_sup[xlabel[ix]] = y_vel_sup
         heat_fluid[xlabel[ix]] = y_heat_fluid
+        heat_joule[xlabel[ix]] = y_heat_joule
         ix += 1
 
     solid_temp_df = pd.DataFrame(solid_temp)
@@ -372,13 +341,7 @@ def main_dynamic():
     flow_mol_df = pd.DataFrame(flow_mol)
     vel_sup_df = pd.DataFrame(vel_sup)
     heat_fluid_df = pd.DataFrame(heat_fluid)
-
-    # breakthrough curve y_co2_out/y_co2_in
-    y_co2_ratio = []
-    for t in m_dyn.fs.config.time:
-        y_co2_ratio.append(
-            value(m_dyn.fs.FB.gas_phase.properties[t, 1].mole_frac_comp["CO2"] / yco2_1)
-        )
+    heat_joule_df = pd.DataFrame(heat_joule)
 
     plt.figure(1)
     plt.plot(time, solid_temp_df, label=xlabel)
@@ -434,8 +397,8 @@ def main_dynamic():
     plt.grid()
     plt.xlabel("Time [s]")
     plt.ylabel("CO2 Loading [mol/kg]")
-    plt.show(block=False)
-
+    plt.show(block=False) 
+    
     plt.figure(8)
     plt.plot(time, loading_co2_eq_df, label=xlabel)
     plt.legend()
@@ -450,7 +413,7 @@ def main_dynamic():
     plt.grid()
     plt.xlabel("Time [s]")
     plt.ylabel("H2O Loading [mol/kg]")
-    plt.show(block=False)
+    plt.show(block=False) 
 
     plt.figure(10)
     plt.plot(time, loading_h2o_eq_df, label=xlabel)
@@ -458,7 +421,7 @@ def main_dynamic():
     plt.grid()
     plt.xlabel("Time [s]")
     plt.ylabel("H2O Loading at Equilibrium [mol/kg]")
-    plt.show(block=False)
+    plt.show(block=False) 
 
     plt.figure(11)
     plt.plot(time, pres_df, label=xlabel)
@@ -493,34 +456,35 @@ def main_dynamic():
     plt.show(block=False)
 
     plt.figure(15)
-    plt.plot(time, y_co2_ratio)
+    plt.plot(time, heat_joule_df, label=xlabel)
+    plt.legend()
     plt.grid()
     plt.xlabel("Time [s]")
-    plt.ylabel("CO2 mole fraction ratio y_out/y_in")
+    plt.ylabel("Joule Heat Duty [W/m]")
     plt.show(block=True)
+
     return m_dyn
 
-
-def write_dynamic_results_to_csv(m_dyn, filename="dynamic_result.csv"):
+def write_dynamic_results_to_csv(m_dyn,filename="dynamic_results.csv"):
     # row index and column heading for DataFrame
     col = []
     col.append("time_s")
-    var_heading = (
-        "solid_temperature_C_x",
-        "gas_tempreature_C_x",
-        "wall_temperature_C_x",
-        "mole_frac_CO2_x",
-        "mole_frac_H2O_x",
-        "mole_frac_N2_x",
-        "loading_CO2_mol/kg_x",
-        "eq_loading_CO2_mol/kg_x",
-        "loading_H2O_mol/kg_x",
-        "eq_loading_H2O_mol/kg_x",
-        "pressure_Pa_x",
-        "flow_mol/s_x",
-        "velocity_superficial_m/s_x",
-        "heat_fluid_to_wall_W/m_x",
-    )
+    var_heading = ("solid_temperature_C_x",
+                   "gas_tempreature_C_x",
+                   "wall_temperature_C_x",
+                   "mole_frac_CO2_x",
+                   "mole_frac_H2O_x",
+                   "mole_frac_N2_x",
+                   "loading_CO2_mol/kg_x",
+                   "eq_loading_CO2_mol/kg_x",
+                   "loading_H2O_mol/kg_x",
+                   "eq_loading_H2O_mol/kg_x",
+                   "pressure_Pa_x",
+                   "flow_mol/s_x",
+                   "velocity_superficial_m/s_x",
+                   "heat_fluid_to_wall_W/m_x"
+                   "Joule_heat_input_W/m_x"
+                   )
     for ivar in var_heading:
         for x in m_dyn.fs.FB.length_domain:
             col.append(f"{ivar}{x}")
@@ -533,12 +497,12 @@ def write_dynamic_results_to_csv(m_dyn, filename="dynamic_result.csv"):
     len_x = len(m_dyn.fs.FB.length_domain)
     nrow = len(m_dyn.fs.time)
     nvar = len(var_heading)  # number of variables to be written
-    ncol = len_x * nvar + 7
-    data = np.zeros([nrow, ncol])
+    ncol = len_x*nvar + 7
+    data = np.zeros([nrow,ncol])
     irow = 0
     ind = []
     for t in m_dyn.fs.time:
-        data[irow, 0] = t
+        data[irow,0] = t
         irow += 1
         ind.append(irow)
     ix = 0
@@ -546,89 +510,51 @@ def write_dynamic_results_to_csv(m_dyn, filename="dynamic_result.csv"):
         irow = 0
         for t in m_dyn.fs.time:
             ivar = 0
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.solid_temperature[t, x] - 273.15
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.solid_temperature[t,x]-273.15)
             ivar = 1
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.gas_phase.properties[t, x].temperature - 273.15
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,x].temperature-273.15)
             ivar = 2
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.wall_temperature[t, x] - 273.15
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.wall_temperature[t,x]-273.15)
             ivar = 3
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.gas_phase.properties[t, x].mole_frac_comp["CO2"]
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,x].mole_frac_comp["CO2"])
             ivar = 4
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.gas_phase.properties[t, x].mole_frac_comp["H2O"]
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,x].mole_frac_comp["H2O"])
             ivar = 5
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.gas_phase.properties[t, x].mole_frac_comp["N2"]
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,x].mole_frac_comp["N2"])
             ivar = 6
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.adsorbate_loading[t, x, "CO2"]
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.adsorbate_loading[t,x,"CO2"])
             ivar = 7
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.adsorbate_loading_equil[t, x, "CO2"]
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.adsorbate_loading_equil[t,x,"CO2"])
             ivar = 8
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.adsorbate_loading[t, x, "H2O"]
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.adsorbate_loading[t,x,"H2O"])
             ivar = 9
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.adsorbate_loading_equil[t, x, "H2O"]
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.adsorbate_loading_equil[t,x,"H2O"])
             ivar = 10
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.gas_phase.properties[t, x].pressure
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,x].pressure)
             ivar = 11
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.gas_phase.properties[t, x].flow_mol
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,x].flow_mol)
             ivar = 12
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.velocity_superficial_gas[t, x]
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.velocity_superficial_gas[t,x])
             ivar = 13
-            data[irow, 1 + ix + len_x * ivar] = value(
-                m_dyn.fs.FB.heat_fluid_to_wall[t, x]
-            )
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.heat_fluid_to_wall[t,x])
+            ivar = 14
+            data[irow,1+ix+len_x*ivar] = value(m_dyn.fs.FB.joule_heating_rate[t,x]*m_dyn.fs.FB.bed_area)
             irow += 1
         ix += 1
     irow = 0
     for t in m_dyn.fs.time:
         ivar = 0
-        data[irow, 1 + len_x * nvar + ivar] = value(
-            m_dyn.fs.FB.gas_phase.properties[t, 0].flow_mol_comp["CO2"]
-        )
+        data[irow,1+len_x*nvar+ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,0].flow_mol_comp["CO2"])
         ivar = 1
-        data[irow, 1 + len_x * nvar + ivar] = value(
-            m_dyn.fs.FB.gas_phase.properties[t, 0].flow_mol_comp["H2O"]
-        )
+        data[irow,1+len_x*nvar+ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,0].flow_mol_comp["H2O"])
         ivar = 2
-        data[irow, 1 + len_x * nvar + ivar] = value(
-            m_dyn.fs.FB.gas_phase.properties[t, 0].flow_mol_comp["N2"]
-        )
+        data[irow,1+len_x*nvar+ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,0].flow_mol_comp["N2"])
         ivar = 3
-        data[irow, 1 + len_x * nvar + ivar] = value(
-            m_dyn.fs.FB.gas_phase.properties[t, 1].flow_mol_comp["CO2"]
-        )
+        data[irow,1+len_x*nvar+ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,1].flow_mol_comp["CO2"])
         ivar = 4
-        data[irow, 1 + len_x * nvar + ivar] = value(
-            m_dyn.fs.FB.gas_phase.properties[t, 1].flow_mol_comp["H2O"]
-        )
+        data[irow,1+len_x*nvar+ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,1].flow_mol_comp["H2O"])
         ivar = 5
-        data[irow, 1 + len_x * nvar + ivar] = value(
-            m_dyn.fs.FB.gas_phase.properties[t, 1].flow_mol_comp["N2"]
-        )
+        data[irow,1+len_x*nvar+ivar] = value(m_dyn.fs.FB.gas_phase.properties[t,1].flow_mol_comp["N2"])
         irow += 1
     df = pd.DataFrame(data, index=ind, columns=col)
     df.to_csv(filename, index=False)
@@ -639,4 +565,8 @@ if __name__ == "__main__":
     # To run steady-state model, call main_steady()
     # to run dynamic model, call main_dyn()
     m_dyn = main_dynamic()
-    # m_ss = main_steady_state()
+    #m_ss = main_steady_state()
+
+
+
+

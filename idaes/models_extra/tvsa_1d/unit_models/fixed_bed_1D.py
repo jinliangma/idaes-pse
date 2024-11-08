@@ -1102,10 +1102,14 @@ and used when constructing these
             cm_beta = 1797
             p_vap = 133 * exp(20.386 - 5132 / T)
             rh = pressure[i] / p_vap
+            # rh_limit = min(0.95, rh)
+            rh_limit = 0.5 * (rh + 0.95 - sqrt((rh - 0.95) * (rh - 0.95) + 1e-10))
+            # rh_limit2 = max(0, rh_limit)
+            rh_limit2 = 0.5 * (rh_limit + sqrt(rh_limit * rh_limit + 1e-10))
             c_g = c_g0 * exp(dh_c / constants.gas_constant / T)
             k_ads = k_0 * exp(dh_k / constants.gas_constant / T)
             c_m = c_m0 * exp(cm_beta / T)
-            k_ads_rh = k_ads * rh
+            k_ads_rh = k_ads * rh_limit2
             loading = c_m * c_g * k_ads_rh / (1 - k_ads_rh) / (1 + (c_g - 1) * k_ads_rh)
             return loading
         else:

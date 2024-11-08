@@ -3,7 +3,7 @@
 # Framework (IDAES IP) was produced under the DOE Institute for the
 # Design of Advanced Energy Systems (IDAES).
 #
-# Copyright (c) 2018-2023 by the software owners: The Regents of the
+# Copyright (c) 2018-2024 by the software owners: The Regents of the
 # University of California, through Lawrence Berkeley National Laboratory,
 # National Technology & Engineering Solutions of Sandia, LLC, Carnegie Mellon
 # University, West Virginia University Research Corporation, et al.
@@ -11,22 +11,8 @@
 # for full copyright and license information.
 ###############################################################################
 
-# Sript for the simulation of a TVSA cycle for DAC application
-
-# ## Simulation details
-# The simulation is set up for the verification of the model. The goal is to
-# successfully compare the model predictions with the experimental breakthrough
-# data published in the dissertation of Joss, L (2016),
-# DOI: https://doi.org/10.3929/ethz-a-010722158, shown in Figure 3.2, page 37.
-# Equipment and inlet stream properties:
-# - Bed height: 0.01 m
-# - Bed diameter: 0.1 m
-# - This example flowsheet is based on NETL polymer sorbent
-#
-
 
 import numpy as np
-import time
 import matplotlib.pyplot as plt
 import pandas as pd
 from pyomo.environ import (
@@ -41,7 +27,6 @@ from pyomo.environ import (
 from pyomo.network import Arc
 from idaes.models.unit_models import ValveFunctionType, Valve
 from idaes.core import FlowsheetBlock, EnergyBalanceType
-import idaes.core.solvers.petsc as petsc  # PETSc utilities module
 from idaes.core.util import scaling as iscale
 from idaes.core.solvers import get_solver
 from idaes.core.util.model_statistics import degrees_of_freedom
@@ -60,7 +45,7 @@ from idaes.models_extra.power_generation.properties.natural_gas_PR import (
     get_prop,
 )
 
-__author__ = "Chinedu Okoli, Anca Ostace, Jinliang Ma"
+__author__ = "Jinliang Ma"
 
 
 def get_model(dynamic=True, time_set=None, nstep=None, init=True):
@@ -158,13 +143,8 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
         2200  # original 220, use a large value to mimic fixed wall temperature
     )
     m.fs.FB.fluid_temperature.fix(298.15)
-    # m.fs.FB.hd_monolith.fix(0.005)
 
-    # Fix boundary values for gas for all time
-    # Gas inlet, 0.1175 mol/s based on Ryan's Aspen model
-    # corresponding to an interstitial velocity at 0.5229 m/s and superficial velocity at 0.3660 at 1 atm
-    # assume steam flow at the end of desorption step is about 1/200 of the air flow when inlet valve is 10% open
-    flow_mol_gas = 3e-5  # 0.1175
+    flow_mol_gas = 3e-5  # Reported by the paper by Young et al. (2021)
     m.fs.Inlet_Valve.Cv.fix(
         0.000003
     )  # Estimated to get the desired flow rates at 90% valve opening
@@ -173,14 +153,14 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     m.fs.Inlet_Valve.inlet.temperature.fix(298.15)
     m.fs.Inlet_Valve.inlet.pressure.fix(
         102000
-    )  # about 0.2 inch water pressure higher than outlet
+    )
     m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "CO2"].fix(0.000001)
     m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "H2O"].fix(0.000001)
     m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "N2"].fix(0.999998)
 
     m.fs.Outlet_Valve.Cv.fix(
         0.000003
-    )  # Estimated to get the desired flow rates at 90% valve opening
+    )
     m.fs.Outlet_Valve.outlet.pressure.fix(101325)
 
     iscale.set_scaling_factor(m.fs.FB.gas_phase.heat, 1e-2)
@@ -196,14 +176,14 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
         m.fs.Outlet_Valve.valve_opening.fix()
         m.fs.Inlet_Valve.inlet.flow_mol.unfix()
     else:
-        solver = get_solver("ipopt")
+        solver = get_solver("ipopt_v2")
         # initialize by fixing flow rate and changing inlet and outlet valve openings
-        m.fs.Inlet_Valve.initialize(outlvl=4)
+        m.fs.Inlet_Valve.initialize()
         propagate_state(m.fs.inlet_valve2bed)
         m.fs.FB.initialize(outlvl=4)
         propagate_state(m.fs.bed2outlet_valve)
         m.fs.Outlet_Valve.valve_opening.unfix()
-        m.fs.Outlet_Valve.initialize(outlvl=4)
+        m.fs.Outlet_Valve.initialize()
         print("flow_mol=", value(m.fs.Inlet_Valve.inlet.flow_mol[0]))
         print(
             "Cvs of inlet and outlet valves=",
@@ -268,15 +248,6 @@ def main_dynamic():
     }
     solver = get_solver("ipopt")
     solver.options = optarg
-    # solve without disturbance
-    dof = degrees_of_freedom(m_dyn)
-    print("dof of dynamic model=", dof)
-    print(
-        "inlet and outlet valve opening at t=0 are",
-        value(m_dyn.fs.Inlet_Valve.valve_opening[0]),
-        value(m_dyn.fs.Outlet_Valve.valve_opening[0]),
-    )
-    # solver.solve(m_dyn,tee=True)
     # add disturbance and solve dynamic model
     for t in m_dyn.fs.time:
         yco2_1 = 0.01
@@ -297,7 +268,6 @@ def main_dynamic():
     # initialize_by_time_element(m_dyn.fs, m_dyn.fs.time, solver=solver, outlvl=4)
     solver.solve(m_dyn, tee=True)
     # write_dynamic_results_to_csv(m_dyn, "Lewatit_1pct_dry_result.csv")
-    # ------------------------------------------------------------------------------
     # plot figures
     time = []
     xlabel = ["x=0.0", "x=0.2", "x=0.4", "x=0.6", "x=0.8", "x=1.0"]
