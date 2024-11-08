@@ -11,10 +11,10 @@
 # for full copyright and license information.
 ###############################################################################
 
-# Sript for the simulation of a TVSA cycle for DAC application using NETL sorbent
+# Sript for the simulation of NETL breakthrough test on Lewatit sorbent
+
 
 import numpy as np
-import time
 import matplotlib.pyplot as plt
 import pandas as pd
 from pyomo.environ import (
@@ -54,9 +54,9 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     m = ConcreteModel()
     m.dynamic = dynamic
     if time_set is None:
-        time_set = [0,20,40,60,900,930,960,1800]
+        time_set = [0,2400]
     if nstep is None:
-        nstep = 50
+        nstep = 30
     if m.dynamic:
         m.fs = FlowsheetBlock(
             dynamic=True, time_set=time_set, time_units=pyunits.s
@@ -81,6 +81,16 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     m.fs.gas_properties.set_default_scaling("flow_mol_phase", 1e1)
     m.fs.gas_properties.set_default_scaling("_energy_density_term", 1e-4)
 
+    _mf_scale = {
+        "CO2": 50,
+        "H2O": 10,
+        "N2": 1,
+    }
+    for comp, s in _mf_scale.items():
+        m.fs.gas_properties.set_default_scaling("mole_frac_comp", s, index=comp)
+        m.fs.gas_properties.set_default_scaling("mole_frac_phase_comp", s, index=("Vap", comp))
+        m.fs.gas_properties.set_default_scaling("flow_mol_phase_comp", s * 1e1, index=("Vap", comp))
+
     nxfe = 20
     x_nfe_list = [0,1]
     m.fs.FB = FixedBed1D(
@@ -91,8 +101,8 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
         energy_balance_type=EnergyBalanceType.enthalpyTotal,
         pressure_drop_type="ergun_correlation",
         property_package=m.fs.gas_properties,
-        adsorbent="netl_sorbent",
-        coadsorption_isotherm="None",
+        adsorbent="Lewatit",
+        coadsorption_isotherm="Mechanistic", #"Stampi-Bombelli", #"WADST","Mechanistic"
         adsorbent_shape="particle",
     )
 
@@ -122,33 +132,28 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     if m.dynamic:
         m.discretizer = TransformationFactory("dae.finite_difference")
         m.discretizer.apply_to(m, nfe=nstep, wrt=m.fs.time, scheme="BACKWARD")
-    m.fs.FB.kf["CO2"] = 0.01
-    m.fs.FB.kf["H2O"] = 0.01
-    m.fs.FB.bed_diameter.fix(0.1)
-    m.fs.FB.wall_diameter.fix(0.105)
-    m.fs.FB.bed_height.fix(0.01)
-    m.fs.FB.particle_dia.fix(2e-3) #5.2e-4 for Lewatit
+    m.fs.FB.kf["CO2"] = 0.002
+    m.fs.FB.kf["H2O"] = 0.002
+    m.fs.FB.bed_diameter.fix(0.0485)
+    m.fs.FB.wall_diameter.fix(0.05)
+    m.fs.FB.bed_height.fix(0.03911)
+    m.fs.FB.particle_dia.fix(5.2e-4) #5.2e-4 for Lewatit
     m.fs.FB.heat_transfer_coeff_gas_wall = 35.3
-    m.fs.FB.heat_transfer_coeff_fluid_wall = 220
-    m.fs.FB.fluid_temperature.fix(348.15)
-    #m.fs.FB.hd_monolith.fix(0.005)
-
-    # Fix boundary values for gas for all time
-    # Gas inlet, 0.1175 mol/s based on Ryan's Aspen model
-    # corresponding to an interstitial velocity at 0.5229 m/s and superficial velocity at 0.3660 at 1 atm
-    # assume steam flow at the end of desorption step is about 1/200 of the air flow when inlet valve is 10% open
-    flow_mol_gas = 0.1175/200
-    m.fs.Inlet_Valve.Cv.fix(0.003)  # Estimated to get the desired flow rates at 90% valve opening
-    m.fs.Inlet_Valve.valve_opening.fix(0.1)
+    m.fs.FB.heat_transfer_coeff_fluid_wall = 0.01 # 220 in Young's paper, use very low value for adiabatic case
+    m.fs.FB.fluid_temperature.fix(298.15)
+    
+    flow_mol_gas = 0.0681 # based on NETL test
+    m.fs.Inlet_Valve.Cv.fix(0.003)
+    m.fs.Inlet_Valve.valve_opening.fix(0.9)
     m.fs.Inlet_Valve.inlet.flow_mol.fix(flow_mol_gas)
-    m.fs.Inlet_Valve.inlet.temperature.fix(348.15)
-    m.fs.Inlet_Valve.inlet.pressure.fix(20050) # about 0.2 inch water pressure higher than outlet
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "CO2"].fix(0.00001)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "H2O"].fix(0.99998)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[:,  "N2"].fix(0.00001)
+    m.fs.Inlet_Valve.inlet.temperature.fix(297.3)
+    m.fs.Inlet_Valve.inlet.pressure.fix(114280) # about 0.2 inch water pressure higher than outlet
+    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "CO2"].fix(0.000001)
+    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "H2O"].fix(0.01)
+    m.fs.Inlet_Valve.inlet.mole_frac_comp[:,  "N2"].fix(0.989999)
 
     m.fs.Outlet_Valve.Cv.fix(0.003) # Estimated to get the desired flow rates at 90% valve opening
-    m.fs.Outlet_Valve.outlet.pressure.fix(2e4)
+    m.fs.Outlet_Valve.outlet.pressure.fix(101059)
 
     iscale.set_scaling_factor(m.fs.FB.gas_phase.heat, 1e-2)
     iscale.set_scaling_factor(m.fs.FB.gas_phase.area, 1e4)
@@ -176,69 +181,22 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
         print("openings of inlet and outlet valves=", value(m.fs.Inlet_Valve.valve_opening[0]), value(m.fs.Outlet_Valve.valve_opening[0]))
         print("bed inlet and outlet pressures = ", value(m.fs.FB.gas_inlet.pressure[0]), value(m.fs.FB.gas_outlet.pressure[0]))
         # unfix flow rate but fix two valve openings, calculate flow rate
+        """
         m.fs.Inlet_Valve.inlet.flow_mol.unfix()
-        m.fs.Inlet_Valve.valve_opening.fix(0.05)
-        m.fs.Outlet_Valve.valve_opening.fix(0.5)
+        m.fs.Inlet_Valve.valve_opening.fix(0.9)
+        m.fs.Outlet_Valve.valve_opening.fix(0.9)
         solver.solve(m, tee=True)
         print("flow_mol=", value(m.fs.Inlet_Valve.inlet.flow_mol[0]))
         print("Cvs of inlet and outlet valves=", value(m.fs.Inlet_Valve.Cv), value(m.fs.Outlet_Valve.Cv))
         print("openings of inlet and outlet valves=", value(m.fs.Inlet_Valve.valve_opening[0]), value(m.fs.Outlet_Valve.valve_opening[0]))
         print("bed inlet and outlet pressures = ", value(m.fs.FB.gas_inlet.pressure[0]), value(m.fs.FB.gas_outlet.pressure[0]))
-
+        """
     return m
 
 
 def main_steady_state():
     m = get_model(dynamic=False)
     return m
-
-def main_steady_state_steps():
-    #steady state at end of desorption step
-    m = get_model(dynamic=False)
-    print_inputs_outputs(m.fs)
-    #steady state at the end of pressurization
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[0,"CO2"].fix(0.0004)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[0,"H2O"].fix(0.01516)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[0, "N2"].fix(0.98444)
-    m.fs.Inlet_Valve.inlet.pressure[0].fix(105000)
-    m.fs.Inlet_Valve.inlet.temperature[0].fix(298.15)
-    m.fs.Inlet_Valve.valve_opening[0].fix(0.9)
-    m.fs.Outlet_Valve.valve_opening[0].fix(0.05)
-    m.fs.Outlet_Valve.outlet.pressure[0].fix(101325)
-    m.fs.FB.fluid_temperature.fix(298.15)
-    solver = get_solver("ipopt")
-    solver.solve(m, tee=True)
-    print_inputs_outputs(m.fs)
-    #steady state at the end of adsorption
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[0,"CO2"].fix(0.0004)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[0,"H2O"].fix(0.01516)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[0, "N2"].fix(0.98444)
-    m.fs.Inlet_Valve.inlet.pressure[0].fix(105000)
-    m.fs.Inlet_Valve.inlet.temperature[0].fix(298.15)
-    m.fs.Inlet_Valve.valve_opening[0].fix(0.9)
-    m.fs.Outlet_Valve.valve_opening[0].fix(0.9)
-    m.fs.Outlet_Valve.outlet.pressure[0].fix(101325)
-    m.fs.FB.fluid_temperature.fix(298.15)
-    solver = get_solver("ipopt")
-    solver.solve(m, tee=True)
-    print_inputs_outputs(m.fs)
-    return m
-
-def print_inputs_outputs(fs):
-    print("------------------------------------------------------")
-    print("Inlet openning =", value(fs.Inlet_Valve.valve_opening[0]))
-    print("Outlet openning =", value(fs.Outlet_Valve.valve_opening[0]))
-    print("Inlet pressure =", value(fs.Inlet_Valve.inlet.pressure[0]))
-    print("Outlet pressure =", value(fs.Outlet_Valve.outlet.pressure[0]))
-    print("Bed inlet pressure =", value(fs.Inlet_Valve.outlet.pressure[0]))
-    print("Bed outlet pressure =", value(fs.Outlet_Valve.inlet.pressure[0]))
-    print("Inlet temperature =", value(fs.Inlet_Valve.inlet.temperature[0]))
-    print("Outlet temperature =", value(fs.Outlet_Valve.outlet.temperature[0]))
-    print("Mole flow rate =", value(fs.Inlet_Valve.inlet.flow_mol[0]))
-    print("Y_CO2 =", value(fs.Inlet_Valve.inlet.mole_frac_comp[0,"CO2"]))
-    print("Y_H2O =", value(fs.Inlet_Valve.inlet.mole_frac_comp[0,"H2O"]))
-    print("Y_N2 =", value(fs.Inlet_Valve.inlet.mole_frac_comp[0,"N2"]))
-    print("Fluid temperature =", value(fs.FB.fluid_temperature[0]))
 
 
 def main_dynamic():
@@ -252,8 +210,9 @@ def main_dynamic():
             m_dyn.fs, m_ss.fs, t, 0.0, copy_fixed=True, outlvl=idaeslog.ERROR
         )
     optarg = {
-    "max_iter": 100,
+    "max_iter": 50,
     "nlp_scaling_method": "user-scaling",
+    #"halt_on_ampl_error": "yes",
     "linear_solver": "ma27",
     }
     solver = get_solver("ipopt")
@@ -265,227 +224,20 @@ def main_dynamic():
     #solver.solve(m_dyn,tee=True)
     #add disturbance and solve dynamic model
     for t in m_dyn.fs.time:
-        yco2_0 = 0.00001
-        yco2_1 = 0.0004
-        yh2o_0 = 0.99998
-        yh2o_1 = 0.01565
-        yn2_0 = 0.00001
-        yn2_1 = 0.98444
-        pin_0 = 20050
-        pin_1 = 105000
-        pout_0 = 20000
-        pout_1 = 101325
-        Tin_0 = 348.15
-        Tin_1 = 298.15
-        Tfluid_0 = 348.15
-        Tfluid_1 = 298.15
-        openin_0 = 0.05
-        openin_1 = 0.2
-        openin_2 = 0.9
-        openin_3 = 0.025 # for purge step
-        openout_0 = 0.5
-        openout_1 = 0.1
-        openout_2 = 0.9
-        openout_3 = 0.5
-        if t<=40: # cooling step, switch to air inlet without vacuum, pressurization
-            if t>10:
-                dt = 20
-                yco2 = yco2_0 + (t-20)*(yco2_1-yco2_0)/dt
-                yh2o = yh2o_0 + (t-20)*(yh2o_1-yh2o_0)/dt
-                yn2 = yn2_0 + (t-20)*(yn2_1-yn2_0)/dt
-                pin = pin_0 + (t-20)*(pin_1-pin_0)/dt
-                pout = pout_0 + (t-20)*(pout_1-pout_0)/dt
-                Tin = Tin_0 + (t-20)*(Tin_1-Tin_0)/dt
-                Tfluid = Tfluid_0 + (t-20)*(Tfluid_1-Tfluid_0)/dt
-                openin = openin_0 + (t-20)*(openin_1-openin_0)/dt
-                openout = openout_0 + (t-20)*(openout_1-openout_0)/dt
-                m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"CO2"].fix(yco2)
-                m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"H2O"].fix(yh2o)
-                m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t, "N2"].fix(yn2)
-                m_dyn.fs.Inlet_Valve.inlet.pressure[t].fix(pin)
-                m_dyn.fs.Outlet_Valve.outlet.pressure[t].fix(pout)
-                m_dyn.fs.Inlet_Valve.inlet.temperature[t].fix(Tin)
-                m_dyn.fs.FB.fluid_temperature.fix(Tfluid_0)
-                m_dyn.fs.Inlet_Valve.valve_opening[t].fix(openin)
-                m_dyn.fs.Outlet_Valve.valve_opening[t].fix(openout)
-        elif t<=60: # pressurization step, open inlet and outlet valve more
-            dt = 20
-            openin = openin_1 + (t-40)*(openin_2-openin_1)/dt
-            openout = openout_1 + (t-40)*(openout_2-openout_1)/dt
+        yco2_1 = 0.00042
+        yh2o_1 = 0.0191
+        yn2_1  = 0.98048
+        if t>30:
             m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"CO2"].fix(yco2_1)
             m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"H2O"].fix(yh2o_1)
             m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t, "N2"].fix(yn2_1)
-            m_dyn.fs.Inlet_Valve.inlet.pressure[t].fix(pin_1)
-            m_dyn.fs.Outlet_Valve.outlet.pressure[t].fix(pout_1)
-            m_dyn.fs.Inlet_Valve.inlet.temperature[t].fix(Tin_1)
-            m_dyn.fs.FB.fluid_temperature[t].fix(Tfluid_1)
-            m_dyn.fs.Inlet_Valve.valve_opening[t].fix(openin)
-            m_dyn.fs.Outlet_Valve.valve_opening[t].fix(openout)
-        elif t<=900: # adsorption step, open inlet and outlet valves to maximum
-            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"CO2"].fix(yco2_1)
-            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"H2O"].fix(yh2o_1)
-            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t, "N2"].fix(yn2_1)
-            m_dyn.fs.Inlet_Valve.inlet.pressure[t].fix(pin_1)
-            m_dyn.fs.Outlet_Valve.outlet.pressure[t].fix(pout_1)
-            m_dyn.fs.Inlet_Valve.inlet.temperature[t].fix(Tin_1)
-            m_dyn.fs.FB.fluid_temperature[t].fix(Tfluid_1)
-            m_dyn.fs.Inlet_Valve.valve_opening[t].fix(openin_2)
-            m_dyn.fs.Outlet_Valve.valve_opening[t].fix(openout_2)
-        elif t<=960: # purge step, add very small amount of steam with inlet valve opening very small
-            dt = 60
-            openin = openin_3 + (t-900)*(openin_0-openin_3)/dt
-            yco2 = yco2_1 + (t-900)*(yco2_0-yco2_1)/dt
-            yh2o = yh2o_1 + (t-900)*(yh2o_0-yh2o_1)/dt
-            yn2 = yn2_1 + (t-900)*(yn2_0-yn2_1)/dt
-            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"CO2"].fix(yco2)
-            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"H2O"].fix(yh2o)
-            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t, "N2"].fix(yn2)
-            m_dyn.fs.Inlet_Valve.inlet.pressure[t].fix(pin_0)
-            m_dyn.fs.Outlet_Valve.outlet.pressure[t].fix(pout_0)
-            m_dyn.fs.Inlet_Valve.inlet.temperature[t].fix(Tin_0)
-            m_dyn.fs.FB.fluid_temperature[t].fix(Tfluid_0)
-            m_dyn.fs.Inlet_Valve.valve_opening[t].fix(openin)
-            m_dyn.fs.Outlet_Valve.valve_opening[t].fix(openout_3)
-        elif t<2000: # desorption step, open inlet and outlet valves to original openings
-            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"CO2"].fix(yco2_0)
-            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"H2O"].fix(yh2o_0)
-            m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t, "N2"].fix(yn2_0)
-            m_dyn.fs.Inlet_Valve.inlet.pressure[t].fix(pin_0)
-            m_dyn.fs.Outlet_Valve.outlet.pressure[t].fix(pout_0)
-            m_dyn.fs.Inlet_Valve.inlet.temperature[t].fix(Tin_0)
-            m_dyn.fs.FB.fluid_temperature[t].fix(Tfluid_0)
-            m_dyn.fs.Inlet_Valve.valve_opening[t].fix(openin_0)
-            m_dyn.fs.Outlet_Valve.valve_opening[t].fix(openout_0)
+       
     print("inlet and outlet valve opening at t=0 are", value(m_dyn.fs.Inlet_Valve.valve_opening[0]), value(m_dyn.fs.Outlet_Valve.valve_opening[0]))
 
     # solve each time element one by one
-    initialize_by_time_element(m_dyn.fs, m_dyn.fs.time, solver=solver)
-    #solver.solve(m_dyn,tee=True)
-
-    # solve cyclic operation by setting the time derivative terms the same for the first and last time elements
-    fb = m_dyn.fs.FB
-    fb.solid_energy_accumulation[0, :].unfix()
-    fb.adsorbate_accumulation[0, :, :].unfix()
-    fb.gas_phase.material_accumulation[0, :, :, :].unfix()
-    fb.gas_phase.energy_accumulation[0, :, :].unfix()
-    fb.wall_temperature_dt[0,:].unfix()
-    fb.f_rlx = Param(initialize=0.15, mutable=True, doc="relaxation factor")
-    @fb.Constraint(
-        fb.length_domain,
-        doc="Constraint for solid energy accummulation")
-    def solid_energy_accummulation_eq(b,x):
-        time = b.flowsheet().time
-        t0 = time.first()
-        t1 = time.last()
-        return b.solid_energy_accumulation[t0,x] == b.solid_energy_accumulation[t1,x]*b.f_rlx
-
-    @fb.Constraint(
-        fb.length_domain,
-        fb.adsorbed_components,
-        doc="Constraint for solid energy accummulation")
-    def adsorbate_accumulation_eq(b,x,i):
-        time = b.flowsheet().time
-        t0 = time.first()
-        t1 = time.last()
-        return b.adsorbate_accumulation[t0,x,i] == b.adsorbate_accumulation[t1,x,i]*b.f_rlx
-
-    @fb.Constraint(
-        fb.length_domain,
-        m_dyn.fs.gas_properties.component_list,
-        doc="Constraint for gas material accummulation")
-    def gas_material_accumulation_eq(b,x,i):
-        time = b.flowsheet().time
-        t0 = time.first()
-        t1 = time.last()
-        return b.gas_phase.material_accumulation[t0,x,"Vap",i] == b.gas_phase.material_accumulation[t1,x,"Vap",i]*b.f_rlx
-
-    @fb.Constraint(
-        fb.length_domain,
-        doc="Constraint for gas energy accummulation")
-    def gas_energy_accumulation_eq(b,x):
-        time = b.flowsheet().time
-        t0 = time.first()
-        t1 = time.last()
-        return b.gas_phase.energy_accumulation[t0,x,"Vap"] == b.gas_phase.energy_accumulation[t1,x,"Vap"]*b.f_rlx
-
-    @fb.Constraint(
-        fb.length_domain,
-        doc="Constraint for wall temperature time derivative")
-    def wall_temperature_dt_eq(b,x):
-        time = b.flowsheet().time
-        t0 = time.first()
-        t1 = time.last()
-        return b.wall_temperature_dt[t0,x] == b.wall_temperature_dt[t1,x]*b.f_rlx
-
-    # adjust relaxation factor to solve cyclic problem
-    fb.f_rlx = 0.2
+    #initialize_by_time_element(m_dyn.fs, m_dyn.fs.time, solver=solver, outlvl=4)
     solver.solve(m_dyn,tee=True)
-    fb.f_rlx = 1.0
-    solver.solve(m_dyn,tee=True)
-
-    #write_dynamic_results_to_csv(m_dyn, "netl_sorbent_full_cycle_results.csv")
-    
-    # calculate perfromance data
-    time_ads = []
-    time_purge = []
-    time_des = []
-    for t in m_dyn.fs.config.time:
-        if t<=900:
-            time_ads.append(t)
-            if t==900:
-                time_purge.append(t)
-        elif t<=960:
-            time_purge.append(t)
-            if t==960:
-                time_des.append(t)
-        else:
-            time_des.append(t)
-    # calculate exit total flow
-    flow_ads_total = 0
-    flow_ads_co2 = 0
-    for i in range(len(time_ads)-1):
-        t1 = time_ads[i]
-        t2 = time_ads[i+1]
-        flow_ads_total += value((m_dyn.fs.Inlet_Valve.inlet.flow_mol[t1]+
-                     m_dyn.fs.Inlet_Valve.inlet.flow_mol[t2])/2*(t2-t1))
-        flow_ads_co2 += value((m_dyn.fs.Inlet_Valve.inlet.flow_mol[t1]*m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t1,"CO2"]+
-                     m_dyn.fs.Inlet_Valve.inlet.flow_mol[t2]*m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t2,"CO2"])/2*(t2-t1))
-    print(f"flow_ads_total={flow_ads_total}, flow_ads_co2={flow_ads_co2}")
-    flow_purge_total = 0
-    flow_purge_co2 = 0
-    flow_purge_n2 = 0
-    flow_purge_h2o = 0
-    for i in range(len(time_purge)-1):
-        t1 = time_purge[i]
-        t2 = time_purge[i+1]
-        flow_purge_total += value((m_dyn.fs.Outlet_Valve.outlet.flow_mol[t1]+
-                     m_dyn.fs.Outlet_Valve.outlet.flow_mol[t2])/2*(t2-t1))
-        flow_purge_co2 += value((m_dyn.fs.Outlet_Valve.outlet.flow_mol[t1]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t1,"CO2"]+
-                     m_dyn.fs.Outlet_Valve.outlet.flow_mol[t2]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t2,"CO2"])/2*(t2-t1))
-        flow_purge_n2 += value((m_dyn.fs.Outlet_Valve.outlet.flow_mol[t1]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t1,"N2"]+
-                     m_dyn.fs.Outlet_Valve.outlet.flow_mol[t2]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t2,"N2"])/2*(t2-t1))
-        flow_purge_h2o += value((m_dyn.fs.Outlet_Valve.outlet.flow_mol[t1]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t1,"H2O"]+
-                     m_dyn.fs.Outlet_Valve.outlet.flow_mol[t2]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t2,"H2O"])/2*(t2-t1))
-    print(f"flow_purge_total={flow_purge_total}, flow_purge_co2={flow_purge_co2}, flow_purge_n2={flow_purge_n2}, flow_purge_h2o={flow_purge_h2o}")  
-
-    flow_des_total = 0
-    flow_des_co2 = 0
-    flow_des_n2 = 0
-    flow_des_h2o = 0
-    for i in range(len(time_des)-1):
-        t1 = time_des[i]
-        t2 = time_des[i+1]
-        flow_des_total += value((m_dyn.fs.Outlet_Valve.outlet.flow_mol[t1]+
-                     m_dyn.fs.Outlet_Valve.outlet.flow_mol[t2])/2*(t2-t1))
-        flow_des_co2 += value((m_dyn.fs.Outlet_Valve.outlet.flow_mol[t1]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t1,"CO2"]+
-                     m_dyn.fs.Outlet_Valve.outlet.flow_mol[t2]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t2,"CO2"])/2*(t2-t1))
-        flow_des_n2 += value((m_dyn.fs.Outlet_Valve.outlet.flow_mol[t1]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t1,"N2"]+
-                     m_dyn.fs.Outlet_Valve.outlet.flow_mol[t2]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t2,"N2"])/2*(t2-t1))
-        flow_des_h2o += value((m_dyn.fs.Outlet_Valve.outlet.flow_mol[t1]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t1,"H2O"]+
-                     m_dyn.fs.Outlet_Valve.outlet.flow_mol[t2]*m_dyn.fs.Outlet_Valve.outlet.mole_frac_comp[t2,"H2O"])/2*(t2-t1))
-    print("flow_des_total, flow_des_co2=, flow_des_n2, flow_des_h2o",flow_des_total, flow_des_co2, flow_des_n2, flow_des_h2o)  
-
-
+    #write_dynamic_results_to_csv(m_dyn)
     #------------------------------------------------------------------------------
     # plot figures
     time = []
@@ -568,6 +320,11 @@ def main_dynamic():
     flow_mol_df = pd.DataFrame(flow_mol)
     vel_sup_df = pd.DataFrame(vel_sup)
     heat_fluid_df = pd.DataFrame(heat_fluid)
+
+    #breakthrough curve y_co2_out/y_co2_in
+    y_co2_ratio = []
+    for t in m_dyn.fs.config.time:
+        y_co2_ratio.append(value(m_dyn.fs.FB.gas_phase.properties[t,1].mole_frac_comp["CO2"])/yco2_1)
 
     plt.figure(1)
     plt.plot(time, solid_temp_df, label=xlabel)
@@ -679,11 +436,17 @@ def main_dynamic():
     plt.grid()
     plt.xlabel("Time [s]")
     plt.ylabel("Heat From Fluid Per Bed Length [W/m]")
-    plt.show(block=True)
+    plt.show(block=False)
 
+    plt.figure(15)
+    plt.plot(time, y_co2_ratio)
+    plt.grid()
+    plt.xlabel("Time [s]")
+    plt.ylabel("CO2 mole fraction ratio y_out/y_in")
+    plt.show(block=True)
     return m_dyn
 
-def write_dynamic_results_to_csv(m_dyn,filename="dynamic_results.csv"):
+def write_dynamic_results_to_csv(m_dyn,filename="Lewatit_mechanistic_k002_results.csv"):
     # row index and column heading for DataFrame
     col = []
     col.append("time_s")
@@ -779,18 +542,8 @@ if __name__ == "__main__":
     # Main function to to run simulation
     # To run steady-state model, call main_steady()
     # to run dynamic model, call main_dyn()
-
-    # This method builds and runs a subcritical coal-fired power plant
-    # dynamic simulation. The simulation consists of 5%/min ramping down from
-    # full load to 50% load, holding for 30 minutes and then ramping up
-    # to 100% load and holding for 20 minutes.
-    # uncomment the code (line 1821) to run this simulation,
-    # note that this simulation takes around ~60 minutes to complete
     m_dyn = main_dynamic()
-
-    # This method builds and runs a steady state subcritical coal-fired power
-    # plant, the simulation consists of a typical base load case.
-    #m_ss = main_steady_state_steps()
+    #m_ss = main_steady_state()
 
 
 
