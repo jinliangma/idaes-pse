@@ -54,7 +54,7 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     m = ConcreteModel()
     m.dynamic = dynamic
     if time_set is None:
-        time_set = [0,2400]
+        time_set = [0,3600]
     if nstep is None:
         nstep = 30
     if m.dynamic:
@@ -102,7 +102,7 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
         pressure_drop_type="ergun_correlation",
         property_package=m.fs.gas_properties,
         adsorbent="Lewatit",
-        coadsorption_isotherm="Mechanistic", #"Stampi-Bombelli", #"WADST","Mechanistic"
+        coadsorption_isotherm="None", #"Stampi-Bombelli", #"WADST","Mechanistic"
         adsorbent_shape="particle",
     )
 
@@ -132,15 +132,18 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     if m.dynamic:
         m.discretizer = TransformationFactory("dae.finite_difference")
         m.discretizer.apply_to(m, nfe=nstep, wrt=m.fs.time, scheme="BACKWARD")
-    m.fs.FB.kf["CO2"] = 0.002
-    m.fs.FB.kf["H2O"] = 0.002
+    m.fs.FB.kf["CO2"] = 0.0005
+    m.fs.FB.kf["H2O"] = 0.03
+    m.fs.FB.dens_mass_particle_param = 3.94E+03 # calculated from the data sheet of manufacturer
+    m.fs.FB.voidage = 0.4  # assumed, typical for spheric particle bed
+    m.fs.FB.particle_voidage = 0.716 # calculated based pore volume per kg sorbent from the data sheet
     m.fs.FB.bed_diameter.fix(0.0485)
     m.fs.FB.wall_diameter.fix(0.05)
-    m.fs.FB.bed_height.fix(0.03911)
+    m.fs.FB.bed_height.fix(0.03911*1.0309)
     m.fs.FB.particle_dia.fix(5.2e-4) #5.2e-4 for Lewatit
     m.fs.FB.heat_transfer_coeff_gas_wall = 35.3
     m.fs.FB.heat_transfer_coeff_fluid_wall = 0.01 # 220 in Young's paper, use very low value for adiabatic case
-    m.fs.FB.fluid_temperature.fix(298.15)
+    m.fs.FB.fluid_temperature.fix(297.3)
     
     flow_mol_gas = 0.0681 # based on NETL test
     m.fs.Inlet_Valve.Cv.fix(0.003)
@@ -149,8 +152,8 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     m.fs.Inlet_Valve.inlet.temperature.fix(297.3)
     m.fs.Inlet_Valve.inlet.pressure.fix(114280) # about 0.2 inch water pressure higher than outlet
     m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "CO2"].fix(0.000001)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "H2O"].fix(0.01)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[:,  "N2"].fix(0.989999)
+    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "H2O"].fix(0.00001)
+    m.fs.Inlet_Valve.inlet.mole_frac_comp[:,  "N2"].fix(0.999989)
 
     m.fs.Outlet_Valve.Cv.fix(0.003) # Estimated to get the desired flow rates at 90% valve opening
     m.fs.Outlet_Valve.outlet.pressure.fix(101059)
@@ -180,6 +183,7 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
         print("Cvs of inlet and outlet valves=", value(m.fs.Inlet_Valve.Cv), value(m.fs.Outlet_Valve.Cv))
         print("openings of inlet and outlet valves=", value(m.fs.Inlet_Valve.valve_opening[0]), value(m.fs.Outlet_Valve.valve_opening[0]))
         print("bed inlet and outlet pressures = ", value(m.fs.FB.gas_inlet.pressure[0]), value(m.fs.FB.gas_outlet.pressure[0]))
+        print("bed mass =", value(m.fs.FB.solid_phase_area*m.fs.FB.bed_height*m.fs.FB.dens_mass_particle_param))
         # unfix flow rate but fix two valve openings, calculate flow rate
         """
         m.fs.Inlet_Valve.inlet.flow_mol.unfix()
@@ -225,8 +229,8 @@ def main_dynamic():
     #add disturbance and solve dynamic model
     for t in m_dyn.fs.time:
         yco2_1 = 0.00042
-        yh2o_1 = 0.0191
-        yn2_1  = 0.98048
+        yh2o_1 = 0.00001
+        yn2_1  = 0.99957
         if t>30:
             m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"CO2"].fix(yco2_1)
             m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t,"H2O"].fix(yh2o_1)

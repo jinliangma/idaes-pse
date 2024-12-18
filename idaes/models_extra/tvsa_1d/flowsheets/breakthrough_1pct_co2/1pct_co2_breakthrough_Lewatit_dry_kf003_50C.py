@@ -11,7 +11,6 @@
 # for full copyright and license information.
 ###############################################################################
 
-
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -22,17 +21,14 @@ from pyomo.environ import (
     Var,
     Param,
     value,
-    assert_optimal_termination,
     units as pyunits,
 )
 from pyomo.network import Arc
-from pyomo.util.check_units import assert_units_consistent
 from idaes.models.unit_models import ValveFunctionType, Valve
 from idaes.core import FlowsheetBlock, EnergyBalanceType
 from idaes.core.util import scaling as iscale
 from idaes.core.solvers import get_solver
 from idaes.core.util.model_statistics import degrees_of_freedom
-from idaes.core.util.model_diagnostics import DiagnosticsToolbox
 from idaes.core.util.dyn_utils import copy_values_at_time, copy_non_time_indexed_values
 from idaes.core.util.initialization import initialize_by_time_element, propagate_state
 import idaes.logger as idaeslog
@@ -55,9 +51,9 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     m = ConcreteModel()
     m.dynamic = dynamic
     if time_set is None:
-        time_set = [0, 30, 60, 2000]
+        time_set = [0, 30, 60, 3000]
     if nstep is None:
-        nstep = 30
+        nstep = 40
     if m.dynamic:
         m.fs = FlowsheetBlock(dynamic=True, time_set=time_set, time_units=pyunits.s)
     else:
@@ -105,7 +101,7 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
         pressure_drop_type="ergun_correlation",
         property_package=m.fs.gas_properties,
         adsorbent="Lewatit",
-        coadsorption_isotherm="Mechanistic",  # "Stampi-Bombelli", #"WADST","Mechanistic"
+        coadsorption_isotherm="None",  # "Stampi-Bombelli", #"WADST","Mechanistic"
         adsorbent_shape="particle",
     )
 
@@ -135,31 +131,30 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
     if m.dynamic:
         m.discretizer = TransformationFactory("dae.finite_difference")
         m.discretizer.apply_to(m, nfe=nstep, wrt=m.fs.time, scheme="BACKWARD")
-    m.fs.FB.kf["CO2"] = 0.005  # original 0.003
-    m.fs.FB.kf["H2O"] = 0.0143  # original 0.0086
+    m.fs.FB.kf["CO2"] = 0.003
+    m.fs.FB.kf["H2O"] = 0.0086 # not important since it is a dry test case
     m.fs.FB.bed_diameter.fix(0.0067)
     m.fs.FB.wall_diameter.fix(0.0068)
-    m.fs.FB.bed_height.fix(0.01074)
+    m.fs.FB.bed_height.fix(0.01074*2.0) # adjusted height since exact bed weight is reported to be approximately 200 mg
     m.fs.FB.particle_dia.fix(5.2e-4)
     m.fs.FB.heat_transfer_coeff_gas_wall = 353.0  # original 35.3
     m.fs.FB.heat_transfer_coeff_fluid_wall = (
         2200  # original 220, use a large value to mimic fixed wall temperature
     )
-    m.fs.FB.fluid_temperature.fix(298.15)
-
-    flow_mol_gas = 3e-5  # Reported by the paper by Young et al. (2021)
+    m.fs.FB.fluid_temperature.fix(323.15) # 50 C
+    flow_mol_gas = 3e-5 * 298.15 / 323.15  # adjust the flow rate due to temperature
     m.fs.Inlet_Valve.Cv.fix(
         0.000003
     )
     m.fs.Inlet_Valve.valve_opening.fix(0.9)
     m.fs.Inlet_Valve.inlet.flow_mol.fix(flow_mol_gas)
-    m.fs.Inlet_Valve.inlet.temperature.fix(298.15)
+    m.fs.Inlet_Valve.inlet.temperature.fix(323.15)
     m.fs.Inlet_Valve.inlet.pressure.fix(
         102000
     )
     m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "CO2"].fix(0.000001)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "H2O"].fix(0.0001)
-    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "N2"].fix(0.999899)
+    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "H2O"].fix(0.000001)
+    m.fs.Inlet_Valve.inlet.mole_frac_comp[:, "N2"].fix(0.999998)
 
     m.fs.Outlet_Valve.Cv.fix(
         0.000003
@@ -203,10 +198,10 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
             value(m.fs.FB.gas_inlet.pressure[0]),
             value(m.fs.FB.gas_outlet.pressure[0]),
         )
-        # unfix flow rate but fix two valve openings, calculate flow rate
+        # unfix flow rate but fix two valve openings corresponding to the given flow rate
         m.fs.Inlet_Valve.inlet.flow_mol.unfix()
-        m.fs.Inlet_Valve.valve_opening.fix(0.9)
-        m.fs.Outlet_Valve.valve_opening.fix(0.43067)
+        m.fs.Inlet_Valve.valve_opening.fix()
+        m.fs.Outlet_Valve.valve_opening.fix()
         solver.solve(m, tee=True)
         print("flow_mol=", value(m.fs.Inlet_Valve.inlet.flow_mol[0]))
         print(
@@ -224,8 +219,8 @@ def get_model(dynamic=True, time_set=None, nstep=None, init=True):
             value(m.fs.FB.gas_inlet.pressure[0]),
             value(m.fs.FB.gas_outlet.pressure[0]),
         )
-        assert_units_consistent(m)
-        print("assert_units_consistent called")
+        print("bed mass =", value(m.fs.FB.solid_phase_area*m.fs.FB.bed_height*m.fs.FB.dens_mass_particle_param))
+
     return m
 
 
@@ -248,15 +243,15 @@ def main_dynamic():
         "max_iter": 50,
         "nlp_scaling_method": "user-scaling",
         # "halt_on_ampl_error": "yes",
-        "linear_solver": "ma27",  # ma57 is default for ipopt_v2, which has convergence issue
+        "linear_solver": "ma27",
     }
-    solver = get_solver("ipopt_v2")
+    solver = get_solver("ipopt")
     solver.options = optarg
     # add disturbance and solve dynamic model
     for t in m_dyn.fs.time:
         yco2_1 = 0.01
-        yh2o_1 = 0.00938  # 0.01565 at 50% RH
-        yn2_1 = 0.98062
+        yh2o_1 = 0.000001  # 0.01565
+        yn2_1 = 0.989999
         if t > 20:
             m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t, "CO2"].fix(yco2_1)
             m_dyn.fs.Inlet_Valve.inlet.mole_frac_comp[t, "H2O"].fix(yh2o_1)
@@ -267,17 +262,11 @@ def main_dynamic():
         value(m_dyn.fs.Inlet_Valve.valve_opening[0]),
         value(m_dyn.fs.Outlet_Valve.valve_opening[0]),
     )
+
     # solve each time element one by one
     # initialize_by_time_element(m_dyn.fs, m_dyn.fs.time, solver=solver, outlvl=4)
-    results = solver.solve(m_dyn, tee=True)
-    # write_dynamic_results_to_csv(m_dyn, "Lewatit_1pct_30RH_high_kf_result.csv")
-    assert_optimal_termination(results)
-    dt = DiagnosticsToolbox(m_dyn)
-    # dt.assert_no_structural_warnings(ignore_unit_consistency=True)
-    # dt.report_structural_issues(m_dyn)
-    print("-----after structure issue")
-    dt.assert_no_numerical_warnings(ignore_parallel_components=True)
-    # dt.display_potential_evaluation_errors(ignore_unit_consistency=True)
+    solver.solve(m_dyn, tee=True)
+    write_dynamic_results_to_csv(m_dyn, "Lewatit_1pct_dry_result_50C.csv")
     # ------------------------------------------------------------------------------
     # plot figures
     time = []

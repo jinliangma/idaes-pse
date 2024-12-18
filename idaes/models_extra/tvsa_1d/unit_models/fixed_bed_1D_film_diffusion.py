@@ -1240,6 +1240,16 @@ and used when constructing these
         )
 
         # Dimensionless numbers, mass and heat transfer coefficients
+        self.Sc_number = Var(
+            self.flowsheet().time,
+            self.length_domain,
+            self.adsorbed_components,
+            domain=Reals,
+            initialize=1.0,
+            doc="Schmidt number",
+            units=pyunits.dimensionless,
+        )
+
         self.Re_number = Var(
             self.flowsheet().time,
             self.length_domain,
@@ -1255,6 +1265,16 @@ and used when constructing these
             domain=Reals,
             initialize=10.0,
             doc="Nusselt number",
+            units=pyunits.dimensionless,
+        )
+
+        self.Sh_number = Var(
+            self.flowsheet().time,
+            self.length_domain,
+            self.adsorbed_components,
+            domain=Reals,
+            initialize=10.0,
+            doc="Sherwood number",
             units=pyunits.dimensionless,
         )
         # Note: Pr number is a property of gas phase
@@ -1273,7 +1293,27 @@ and used when constructing these
             domain=Reals,
             initialize=1.0,
             doc="Gas-solid heat transfer coefficient",
-            units=pyunits.J / pyunits.s / pyunits.K / pyunits.m**2,
+            units=pyunits.m / pyunits.s / pyunits.K / pyunits.m**2,
+        )
+
+        self.kc_film = Var(
+            self.flowsheet().time,
+            self.length_domain,
+            self.adsorbed_components,
+            domain=Reals,
+            initialize=1.0,
+            doc="film diffusion mass transfer coefficient",
+            units=pyunits.m / pyunits.s,
+        )
+
+        self.mole_frac_comp_surface = Var(
+            self.flowsheet().time,
+            self.length_domain,
+            self.adsorbed_components,
+            domain=Reals,
+            initialize=0.1,
+            doc="mole fraction of adsorbed species at sorbent external surface",
+            units=pyunits.dimensionless,
         )
 
         self.heat_solid_to_gas = Var(
@@ -1405,10 +1445,11 @@ and used when constructing these
                 - 36429260.874471694231033 * X1**3
                 - 12000607.575006244704127
             ) * pyunits.Pa
+            # use mole fraction at external surface
             return (
                 b.RH[t, x] * p_vap * 1e-3
                 == 1e-3
-                * b.gas_phase.properties[t, x].mole_frac_comp["H2O"]
+                * b.mole_frac_comp_surface[t, x, "H2O"]
                 * b.gas_phase.properties[t, x].pressure
             )
 
@@ -1504,10 +1545,11 @@ and used when constructing these
         )
         def isotherm_eqn(b, t, x, j):
             pres = {}
+            # use external surface mole fractions
             for i in b.adsorbed_components:
                 pres[i] = (
                     b.gas_phase.properties[t, x].pressure
-                    * b.gas_phase.properties[t, x].mole_frac_comp[i]
+                    * b.mole_frac_comp_surface[t, x, i]
                 )
             if self.config.has_microwave_heating:
                 T = b.solid_temperature_active[t, x]
@@ -1650,6 +1692,26 @@ and used when constructing these
             else:
                 return b.gas_phase.mass_transfer_term[t, x, "Vap", j] == 0.0
 
+        # Mass transfer term due to film diffusion
+        @self.Constraint(
+            self.flowsheet().time,
+            self.length_domain,
+            self.adsorbed_components,
+            doc=""""Mass transfer rate due to film diffusion""",
+        )
+        def mass_transfer_film_diffusion_eqn(b, t, x, j):
+            return (b.gas_phase.mass_transfer_term[t, x, "Vap", j] == 
+                b.kc_film[t, x, j]
+                * (
+                    b.mole_frac_comp_surface[t, x, j]
+                    - b.gas_phase.properties[t, x].mole_frac_comp[j]
+                )
+                * b.wet_surface_area_per_length
+                * b.gas_phase.properties[t, x].pressure
+                / b.gas_phase.properties[t, x].temperature
+                / constants.gas_constant
+            )
+
         # Enthalpy transfer term due to adsorption, use enthalpy in gas phase
         @self.Constraint(
             self.flowsheet().time,
@@ -1714,6 +1776,45 @@ and used when constructing these
                     # * b.gas_phase.properties[t,x].prandtl_number_phase["Vap"] ** 0.3
                 )
 
+        # Gas phase Schmidt number, it is actually a property
+        @self.Constraint(
+            self.flowsheet().time, self.length_domain, self.adsorbed_components, doc="Gas phase schmidt number"
+        )
+        def schmidt_number_gas(b, t, x, i):
+            if i=="CO2":
+                diffusivity = 1.65e-5*pyunits.m**2/pyunits.s
+            elif i=="H2O":
+                diffusivity = 2.6e-5*pyunits.m**2/pyunits.s
+            else:
+                diffusivity = 1.5e-5*pyunits.m**2/pyunits.s
+            return (
+                b.Sc_number[t, x, i]
+                == b.gas_phase.properties[t, x].visc_d_phase["Vap"]
+                /b.gas_phase.properties[t, x].dens_mass_phase["Vap"]
+                /diffusivity
+            )
+
+        # Particle Sherwood number
+        @self.Constraint(
+            self.flowsheet().time, self.length_domain, self.adsorbed_components, doc="Particle Sherwood number"
+        )
+        def sherwood_number_particle(b, t, x, i):
+            if self.config.adsorbent_shape == "particle":
+                return (
+                    b.Sh_number[t, x, i]
+                    == 2.0
+                    + 0.552
+                    * b.Re_number[t, x] ** 0.5
+                    * b.Sc_number[t, x, i] ** 0.3333
+                )
+            else:
+                # for fully developed laminar flow, use constant Nu (Incropera & DeWitt)
+                # currently doubled to help convergence
+                return (
+                    b.Sh_number[t, x, i]
+                    == 3.66 * 2  # Literature value is 3.66
+                )
+
         # Gas-solid heat transfer coefficient
         @self.Constraint(
             self.flowsheet().time,
@@ -1732,6 +1833,33 @@ and used when constructing these
                     b.gas_solid_htc[t, x] * b.hd_monolith
                     == b.Nu_number[t, x]
                     * b.gas_phase.properties[t, x].therm_cond_phase["Vap"]
+                )
+
+        # film mass transfer coefficient
+        @self.Constraint(
+            self.flowsheet().time,
+            self.length_domain,
+            self.adsorbed_components,
+            doc="Film mass transfer coefficient",
+        )
+        def kc_film_eqn(b, t, x, i):
+            if i=="CO2":
+                diffusivity = 1.65e-5*pyunits.m**2/pyunits.s
+            elif i=="H2O":
+                diffusivity = 2.6e-5*pyunits.m**2/pyunits.s
+            else:
+                diffusivity = 1.5e-5*pyunits.m**2/pyunits.s
+            if self.config.adsorbent_shape == "particle":
+                return (
+                    b.kc_film[t, x, i] * b.particle_dia
+                    == b.Sh_number[t, x, i]
+                    * diffusivity
+                )
+            else:
+                return (
+                    b.kc_film[t, x] * b.hd_monolith
+                    == b.Sh_number[t, x, i]
+                    * diffusivity
                 )
 
         # heat transfer rate from solid phase to gas phase
